@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2002-2015   ProcessOne
+ * ejabberd, Copyright (C) 2002-2012   ProcessOne
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -18,6 +18,7 @@
  *
  */
 
+
 #include <stdio.h>
 #include <string.h>
 #include <erl_driver.h>
@@ -32,7 +33,6 @@
 
 #define PARSE_COMMAND 0
 #define PARSE_FINAL_COMMAND 1
-#define PARSING_NOT_RESUMABLE XML_FALSE
 
 /*
  * R15B changed several driver callbacks to use ErlDrvSizeT and
@@ -70,13 +70,13 @@ void encode_name(const XML_Char *name)
       memcpy(buf, prefix_start+1, prefix_len);
       memcpy(buf+prefix_len, name_start, name_len);
       buf[prefix_len] = ':';
-      ei_x_encode_binary(&event_buf, buf, buf_len);
+      ei_x_encode_string_len(&event_buf, buf, buf_len);
       driver_free(buf);
     } else {
-       ei_x_encode_binary(&event_buf, name_start+1, strlen(name_start+1));
+      ei_x_encode_string(&event_buf, name_start+1);
     };
   } else {
-     ei_x_encode_binary(&event_buf, name, strlen(name));
+    ei_x_encode_string(&event_buf, name);
   }
 }
 
@@ -105,7 +105,7 @@ void *erlXML_StartElementHandler(expat_data *d,
       {
 	 ei_x_encode_tuple_header(&event_buf, 2);
 	 encode_name(atts[i]);
-	 ei_x_encode_binary(&event_buf, atts[i+1], strlen(atts[i+1]));
+	 ei_x_encode_string(&event_buf, atts[i+1]);
       }
    }
 
@@ -159,43 +159,14 @@ void *erlXML_StartNamespaceDeclHandler(expat_data *d,
     buf = driver_alloc(7 + prefix_len);
     strcpy(buf, "xmlns:");
     strcpy(buf+6, prefix);
-    ei_x_encode_binary(&xmlns_buf, buf, strlen(buf));
+    ei_x_encode_string(&xmlns_buf, buf);
     driver_free(buf);
   } else {
-     ei_x_encode_binary(&xmlns_buf, "xmlns", strlen("xmlns"));
+    ei_x_encode_string(&xmlns_buf, "xmlns");
   };
-  ei_x_encode_binary(&xmlns_buf, uri, strlen(uri));
+  ei_x_encode_string(&xmlns_buf, uri);
 
   return NULL;
-}
-
-/*
- * Prevent entity expansion attacks (CVE-2013-1664) by refusing
- * to process any XML that contains a DTD.
- */
-void *erlXML_StartDoctypeDeclHandler(expat_data *d,
-                                    const XML_Char *doctypeName,
-                                    const XML_Char *doctypeSysid,
-                                    const XML_Char *doctypePubid,
-                                    int hasInternalSubset)
-{
-   XML_StopParser(d->parser, PARSING_NOT_RESUMABLE);
-   return NULL;
-}
-
-/*
- * Prevent entity expansion attacks (CVE-2013-1664) by having an explicit
- * default handler. According to the documentation,
- *
- * "Setting the handler with this call has the side effect of turning off
- *  expansion of references to internally defined general entities. Instead
- *  these references are passed to the default handler."
- */
-void *erlXML_DefaultHandler(expat_data *d,
-							const XML_Char *s,
-							int len)
-{
-   return NULL;
 }
 
 static ErlDrvData expat_erl_start(ErlDrvPort port, char *buff)
@@ -216,12 +187,9 @@ static ErlDrvData expat_erl_start(ErlDrvPort port, char *buff)
 
    XML_SetStartNamespaceDeclHandler(
       d->parser, (XML_StartNamespaceDeclHandler) erlXML_StartNamespaceDeclHandler);
-   XML_SetStartDoctypeDeclHandler(
-      d->parser, (XML_StartDoctypeDeclHandler) erlXML_StartDoctypeDeclHandler);
    XML_SetReturnNSTriplet(d->parser, 1);
 
-   XML_SetDefaultHandler(
-      d->parser, (XML_DefaultHandler) erlXML_DefaultHandler);
+   XML_SetDefaultHandler(d->parser, NULL);
 
    return (ErlDrvData)d;
 }
@@ -249,51 +217,19 @@ static ErlDrvSSizeT expat_erl_control(ErlDrvData drv_data,
       case PARSE_FINAL_COMMAND:
 	 ei_x_new_with_version(&event_buf);
 	 ei_x_new(&xmlns_buf);
-#ifdef ENABLE_FLASH_HACK
-        /* Flash hack - Flash clients send a null byte after the stanza.  Remove that... */
-        {
-           int i;
-           int found_null = 0;
-
-           /* Maybe the Flash client sent many stanzas in one packet.
-              If so, there is a null byte between every stanza. */
-           for (i = 0; i < len; i++) {
-              if (buf[i] == '\0') {
-                 buf[i] = ' ';
-                 found_null = 1;
-              }
-           }
-
-           /* And also remove the closing slash if this is a
-              flash:stream element.  Assume that flash:stream is the
-              last element in the packet, and entirely contained in
-              it.  This requires that a null byte has been found. */
-           if (found_null && strstr(buf, "<flash:stream"))
-              /* buf[len - 1] is an erased null byte.
-                 buf[len - 2] is >
-                 buf[len - 3] is / (maybe)
-              */
-              if (buf[len - 3] == '/')
-                 buf[len - 3] = ' ';
-        }
-#endif /* ENABLE_FLASH_HACK */
-
 	 res = XML_Parse(d->parser, buf, len, command == PARSE_FINAL_COMMAND);
 
 	 if(!res)
 	 {
-		 errcode = XML_GetErrorCode(d->parser);
-		 if (errcode == XML_STATUS_SUSPENDED)
-			 errstring = (char *)"DTDs are not allowed";
-		 else
-			 errstring = (char *)XML_ErrorString(errcode);
+	    errcode = XML_GetErrorCode(d->parser);
+	    errstring = (char *)XML_ErrorString(errcode);
 
 	    ei_x_encode_list_header(&event_buf, 1);
 	    ei_x_encode_tuple_header(&event_buf, 2);
 	    ei_x_encode_long(&event_buf, XML_ERROR);
 	    ei_x_encode_tuple_header(&event_buf, 2);
 	    ei_x_encode_long(&event_buf, errcode);
-	    ei_x_encode_binary(&event_buf, errstring, strlen(errstring));
+	    ei_x_encode_string(&event_buf, errstring);
 	 }
 
 	 ei_x_encode_empty_list(&event_buf);

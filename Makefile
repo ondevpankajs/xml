@@ -1,12 +1,12 @@
 all: src
 
 src:
-	rebar compile
+	./rebar compile
 
 clean:
-	rebar clean
+	./rebar clean
 
 test:
-	rebar eunit
+	./rebar eunit
 
 .PHONY: clean src test
